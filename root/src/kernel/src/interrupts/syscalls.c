@@ -16,11 +16,13 @@ static inline int privilege_check(size_t base, size_t len) {
         return 0;
 }
 
-/* Prototype syscall: int syscall_name(struct ctx_t *ctx) */
+/* Prototype syscall: void syscall_name(struct ctx_t *ctx) */
 
 /* Conventional argument passing: rdi, rsi, rdx, r10, r8, r9 */
 
-int syscall_fork(struct ctx_t *ctx) {
+/* Should return in ctx->rax, errno in ctx->rdx */
+
+void syscall_fork(struct ctx_t *ctx) {
     spinlock_acquire(&scheduler_lock);
 
     pid_t current_task = cpu_locals[current_cpu].current_task;
@@ -79,10 +81,11 @@ found_new_task_id:
 
     spinlock_release(&scheduler_lock);
 
-    return new_pid;
+    ctx->rax = new_pid;
+    return;
 }
 
-int syscall_set_fs_base(struct ctx_t *ctx) {
+void syscall_set_fs_base(struct ctx_t *ctx) {
     // rdi: new fs base
 
     spinlock_acquire(&scheduler_lock);
@@ -94,10 +97,11 @@ int syscall_set_fs_base(struct ctx_t *ctx) {
 
     spinlock_release(&scheduler_lock);
 
-    return 0;
+    ctx->rax = 0;
+    return;
 }
 
-void *syscall_alloc_at(struct ctx_t *ctx) {
+void syscall_alloc_at(struct ctx_t *ctx) {
     // rdi: virtual address / 0 for sbrk-like allocation
     // rsi: page count
 
@@ -109,14 +113,17 @@ void *syscall_alloc_at(struct ctx_t *ctx) {
     size_t base_address;
     if (ctx->rdi) {
         base_address = ctx->rdi;
-        if (privilege_check(base_address, ctx->rsi * PAGE_SIZE))
-            return (void *)0;
+        if (privilege_check(base_address, ctx->rsi * PAGE_SIZE)) {
+            ctx->rax = 0;
+            return;
+        }
     } else {
         spinlock_acquire(&process->cur_brk_lock);
         base_address = process->cur_brk;
         if (privilege_check(base_address, ctx->rsi * PAGE_SIZE)) {
             spinlock_release(&process->cur_brk_lock);
-            return (void *)0;
+            ctx->rax = 0;
+            return;
         }
         process->cur_brk += ctx->rsi * PAGE_SIZE;
         spinlock_release(&process->cur_brk_lock);
@@ -124,28 +131,36 @@ void *syscall_alloc_at(struct ctx_t *ctx) {
 
     for (size_t i = 0; i < ctx->rsi; i++) {
         void *ptr = pmm_alloc(1);
-        if (!ptr)
-            return (void *)0;
+        if (!ptr) {
+            ctx->rax = 0;
+            return;
+        }
         if (map_page(process->pagemap, (size_t)ptr, base_address + i * PAGE_SIZE, 0x07)) {
             pmm_free(ptr, 1);
-            return (void *)0;
+            ctx->rax = 0;
+            return;
         }
     }
 
-    return (void *)base_address;
+    ctx->rax = base_address;
+    return;
 }
 
-int syscall_debug_print(struct ctx_t *ctx) {
+void syscall_debug_print(struct ctx_t *ctx) {
     // rdi: print type
     // rsi: string
 
     // Make sure the type isn't invalid
-    if (ctx->rdi > KPRN_MAX_TYPE)
-        return -1;
+    if (ctx->rdi > KPRN_MAX_TYPE) {
+        ctx->rax = -1;
+        return;
+    }
 
     // Make sure we're not trying to print memory that doesn't belong to us
-    if (privilege_check(ctx->rsi, kstrlen((const char *)ctx->rsi)))
-        return -1;
+    if (privilege_check(ctx->rsi, kstrlen((const char *)ctx->rsi))) {
+        ctx->rax = -1;
+        return;
+    }
 
     kprint(ctx->rdi, "[%u:%u:%u] %s",
            cpu_locals[current_cpu].current_process,
@@ -153,14 +168,16 @@ int syscall_debug_print(struct ctx_t *ctx) {
            current_cpu,
            ctx->rsi);
 
-    return 0;
+    ctx->rax = 0;
+    return;
 }
 
-pid_t syscall_getpid(void) {
-    return cpu_locals[current_cpu].current_process;
+void syscall_getpid(struct ctx_t *ctx) {
+    ctx->rax = cpu_locals[current_cpu].current_process;
+    return;
 }
 
-int syscall_open(struct ctx_t *ctx) {
+void syscall_open(struct ctx_t *ctx) {
     // rdi: path
     // rsi: mode
     // rdx: perms
@@ -170,8 +187,10 @@ int syscall_open(struct ctx_t *ctx) {
     struct process_t *process = process_table[current_process];
     spinlock_release(&scheduler_lock);
 
-    if (privilege_check(ctx->rdi, kstrlen((const char *)ctx->rdi)))
-        return -1;
+    if (privilege_check(ctx->rdi, kstrlen((const char *)ctx->rdi))) {
+        ctx->rax = -1;
+        return;
+    }
 
     spinlock_acquire(&process->file_handles_lock);
 
@@ -180,7 +199,8 @@ int syscall_open(struct ctx_t *ctx) {
     for (local_fd = 0; process->file_handles[local_fd] != -1; local_fd++)
         if (local_fd + 1 == MAX_FILE_HANDLES) {
             spinlock_release(&process->file_handles_lock);
-            return -1;
+            ctx->rax = -1;
+            return;
         }
 
     char abs_path[2048];
@@ -190,16 +210,18 @@ int syscall_open(struct ctx_t *ctx) {
     int fd = open(abs_path, ctx->rsi, ctx->rdx);
     if (fd < 0) {
         spinlock_release(&process->file_handles_lock);
-        return fd;
+        ctx->rax = fd;
+        return;
     }
 
     process->file_handles[local_fd] = fd;
 
     spinlock_release(&process->file_handles_lock);
-    return local_fd;
+    ctx->rax = local_fd;
+    return;
 }
 
-int syscall_close(struct ctx_t *ctx) {
+void syscall_close(struct ctx_t *ctx) {
     // rdi: fd
 
     spinlock_acquire(&scheduler_lock);
@@ -210,22 +232,25 @@ int syscall_close(struct ctx_t *ctx) {
     spinlock_acquire(&process->file_handles_lock);
     if (process->file_handles[ctx->rdi] == -1) {
         spinlock_release(&process->file_handles_lock);
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     int ret = close(process->file_handles[ctx->rdi]);
     if (ret < 0) {
         spinlock_release(&process->file_handles_lock);
-        return ret;
+        ctx->rax = ret;
+        return;
     }
 
     process->file_handles[ctx->rdi] = -1;
 
     spinlock_release(&process->file_handles_lock);
-    return 0;
+    ctx->rax = 0;
+    return;
 }
 
-int syscall_lseek(struct ctx_t *ctx) {
+void syscall_lseek(struct ctx_t *ctx) {
     // rdi: fd
     // rsi: offset
     // rdx: type
@@ -238,21 +263,24 @@ int syscall_lseek(struct ctx_t *ctx) {
     spinlock_acquire(&process->file_handles_lock);
     if (process->file_handles[ctx->rdi] == -1) {
         spinlock_release(&process->file_handles_lock);
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     size_t ret = lseek(process->file_handles[ctx->rdi], ctx->rsi, ctx->rdx);
 
     spinlock_release(&process->file_handles_lock);
-    return ret;
+    ctx->rax = ret;
+    return;
 }
 
-int syscall_fstat(struct ctx_t *ctx) {
+void syscall_fstat(struct ctx_t *ctx) {
     // rdi: fd
     // rsi: struct stat
 
     if (privilege_check(ctx->rsi, sizeof(struct stat))) {
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     spinlock_acquire(&scheduler_lock);
@@ -263,18 +291,20 @@ int syscall_fstat(struct ctx_t *ctx) {
     spinlock_acquire(&process->file_handles_lock);
     if (process->file_handles[ctx->rdi] == -1) {
         spinlock_release(&process->file_handles_lock);
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     size_t ret = fstat(process->file_handles[ctx->rdi], (struct stat *)ctx->rsi);
 
     spinlock_release(&process->file_handles_lock);
-    return ret;
+    ctx->rax = ret;
+    return;
 }
 
 #define SYSCALL_IO_CAP 8192     // cap reads and writes at 8k at a time
 
-int syscall_read(struct ctx_t *ctx) {
+void syscall_read(struct ctx_t *ctx) {
     // rdi: fd
     // rsi: buf
     // rdx: len
@@ -285,13 +315,15 @@ int syscall_read(struct ctx_t *ctx) {
     spinlock_release(&scheduler_lock);
 
     if (privilege_check(ctx->rsi, ctx->rdx)) {
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     spinlock_acquire(&process->file_handles_lock);
     if (process->file_handles[ctx->rdi] == -1) {
         spinlock_release(&process->file_handles_lock);
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     size_t ptr = 0;
@@ -308,10 +340,11 @@ int syscall_read(struct ctx_t *ctx) {
     }
 
     spinlock_release(&process->file_handles_lock);
-    return ptr;
+    ctx->rax = ptr;
+    return;
 }
 
-int syscall_write(struct ctx_t *ctx) {
+void syscall_write(struct ctx_t *ctx) {
     // rdi: fd
     // rsi: buf
     // rdx: len
@@ -322,13 +355,15 @@ int syscall_write(struct ctx_t *ctx) {
     spinlock_release(&scheduler_lock);
 
     if (privilege_check(ctx->rsi, ctx->rdx)) {
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     spinlock_acquire(&process->file_handles_lock);
     if (process->file_handles[ctx->rdi] == -1) {
         spinlock_release(&process->file_handles_lock);
-        return -1;
+        ctx->rax = -1;
+        return;
     }
 
     size_t ptr = 0;
@@ -345,5 +380,6 @@ int syscall_write(struct ctx_t *ctx) {
     }
 
     spinlock_release(&process->file_handles_lock);
-    return ptr;
+    ctx->rax = ptr;
+    return;
 }

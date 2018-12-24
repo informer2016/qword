@@ -81,8 +81,8 @@ void kmain_thread(void *arg) {
 
     /* Execute init process */
     kprint(KPRN_INFO, "kmain: Starting init");
-    const char *args[] = { init, NULL };
-    const char *environ[] = { NULL };
+    const char *args[] = { init, "--norc", NULL };
+    const char *environ[] = { "PS1=\e[32m\\u@\\h\e[37m:\e[36m\\w\e[37m\\$ ", NULL };
     if (kexec(init, args, environ, "/dev/tty", "/dev/tty", "/dev/tty") == -1) {
         panic("Unable to launch init", 0, 0);
     }

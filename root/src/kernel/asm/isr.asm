@@ -141,24 +141,6 @@ extern kbd_handler
     pop rax
 %endmacro
 
-; this doesn't pop rax which is the return register for syscalls
-%macro popams 0
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-%endmacro
-
 section .text
 bits 64
 
@@ -245,10 +227,6 @@ ipi_resched:
     hlt
     jmp .halt
 
-invalid_syscall:
-    mov rax, -1
-    ret
-
 section .data
 
 syscall_count equ ((syscall_table.end - syscall_table) / 8)
@@ -277,7 +255,6 @@ syscall_table:
     dq syscall_fstat ;9
     extern syscall_fork
     dq syscall_fork ;10
-    dq invalid_syscall
   .end:
 
 section .text
@@ -303,8 +280,7 @@ syscall_entry:
 
     call [syscall_table + rax * 8]
 
-  .out:
-    popams
+    popam
 
     cli
 
@@ -313,8 +289,12 @@ syscall_entry:
     o64 sysret
 
   .err:
+    popam
     mov rax, -1
-    jmp .out
+    mov rdx, 1051   ; errno.h ENOSYS
+    cli
+    mov rsp, qword [gs:0024] ; restore the user stack
+    o64 sysret
 
 pic0_generic:
     common_handler pic0_generic_handler
